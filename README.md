@@ -19,7 +19,7 @@ http://localhost:4173
 ## Included
 
 - Create private game rooms
-- Upload 10-20 named photos
+- Upload 2-20 named photos
 - Demo board for instant playtesting
 - Six-character room codes
 - Shareable invite links

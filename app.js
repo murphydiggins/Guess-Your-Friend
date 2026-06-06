@@ -1,7 +1,9 @@
 const STORAGE_KEY = "friend-who.games.v1";
 const SESSION_KEY = "friend-who.player.v1";
 const MAX_ROSTER = 20;
-const MIN_ROSTER = 10;
+const MIN_ROSTER = 2;
+const PHOTO_MAX_SIZE = 720;
+const PHOTO_QUALITY = 0.72;
 
 const demoPeople = [
   ["Maya", "teal", ["glasses", "curly hair", "blue shirt"]],
@@ -47,7 +49,7 @@ const homeTemplate = document.querySelector("#homeTemplate");
 init();
 
 function init() {
-  state.draftRoster = makeBlankRoster(10);
+  state.draftRoster = makeBlankRoster(MIN_ROSTER);
   const url = new URL(window.location.href);
   const code = normalizeCode(url.searchParams.get("code") || "");
   const urlPlayerId = url.searchParams.get("player");
@@ -158,7 +160,7 @@ function renderCreate() {
         <div>
           <p class="eyebrow">Create private game</p>
           <h2>Build the face board.</h2>
-          <p>Add 10-20 people with a name and photo. Use the demo roster when you want to play immediately.</p>
+          <p>Add 2-20 people with a name and photo. Use the demo roster when you want to play immediately.</p>
         </div>
         <button class="secondary-button" data-action="home" type="button">Back</button>
       </div>
@@ -226,7 +228,7 @@ function renderCreate() {
   });
 
   document.querySelector("[data-action='clear-roster']").addEventListener("click", () => {
-    state.draftRoster = makeBlankRoster(10);
+    state.draftRoster = makeBlankRoster(MIN_ROSTER);
     renderPeopleEditor();
   });
 
@@ -270,16 +272,21 @@ function renderPeopleEditor() {
     input.addEventListener("change", async (event) => {
       const file = event.target.files[0];
       if (!file) return;
-      const dataUrl = await readFile(file);
-      state.draftRoster[Number(event.target.dataset.photoIndex)].photo = dataUrl;
-      renderPeopleEditor();
+      try {
+        toast("Optimizing photo...");
+        const dataUrl = await compressImage(file);
+        state.draftRoster[Number(event.target.dataset.photoIndex)].photo = dataUrl;
+        renderPeopleEditor();
+      } catch {
+        toast("Could not load that photo");
+      }
     });
   });
 
   editor.querySelectorAll("[data-remove-index]").forEach((button) => {
     button.addEventListener("click", () => {
       if (state.draftRoster.length <= MIN_ROSTER) {
-        toast("Keep at least 10 slots");
+        toast("Keep at least 2 slots");
         return;
       }
       state.draftRoster.splice(Number(button.dataset.removeIndex), 1);
@@ -602,7 +609,7 @@ function renderGame() {
 function createGame(formData) {
   const roster = validRoster(state.draftRoster);
   if (roster.length < MIN_ROSTER) {
-    toast("Add at least 10 named photos");
+    toast("Add at least 2 named photos");
     return;
   }
 
@@ -633,7 +640,12 @@ function createGame(formData) {
 
   const games = loadGames();
   games[code] = game;
-  saveGames(games);
+  try {
+    saveGames(games);
+  } catch {
+    toast("Photos are too large. Try fewer photos or smaller images.");
+    return;
+  }
 
   state.activeCode = code;
   state.playerId = playerId;
@@ -898,8 +910,12 @@ function mutateGame(code, mutator) {
   if (!game) return;
   mutator(game);
   games[normalized] = game;
-  saveGames(games);
-  render();
+  try {
+    saveGames(games);
+    render();
+  } catch {
+    toast("Could not save the latest move");
+  }
 }
 
 function uniqueCode() {
@@ -955,11 +971,31 @@ function systemEvent(player, label, text) {
   };
 }
 
-function readFile(file) {
+function compressImage(file) {
   return new Promise((resolve, reject) => {
+    if (!file.type.startsWith("image/")) {
+      reject(new Error("Not an image"));
+      return;
+    }
+
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
     reader.onerror = reject;
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = reject;
+      image.onload = () => {
+        const scale = Math.min(1, PHOTO_MAX_SIZE / Math.max(image.naturalWidth, image.naturalHeight));
+        const width = Math.max(1, Math.round(image.naturalWidth * scale));
+        const height = Math.max(1, Math.round(image.naturalHeight * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", PHOTO_QUALITY));
+      };
+      image.src = reader.result;
+    };
     reader.readAsDataURL(file);
   });
 }
