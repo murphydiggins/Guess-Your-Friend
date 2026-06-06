@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Friend Who?</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <button class="brand" id="homeButton" type="button" aria-label="Go home">
+          <span class="brand-mark">?</span>
+          <span>
+            <strong>Friend Who?</strong>
+            <small>custom face guessing game</small>
+          </span>
+        </button>
+        <nav class="top-actions">
+          <button class="icon-button" id="resetButton" type="button" title="Clear saved demo games" aria-label="Clear saved demo games">
+            <span aria-hidden="true">R</span>
+          </button>
+        </nav>
+      </header>
+
+      <main id="app" class="view"></main>
+    </div>
+
+    <template id="homeTemplate">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Private party boards from real friend groups</p>
+          <h1>Guess the mystery person, using faces you actually know.</h1>
+          <p>
+            Upload 10-20 photos, share a room code, and play a turn-based yes/no guessing game on a responsive board.
+          </p>
+          <div class="hero-actions">
+            <button class="primary-button" data-action="show-create" type="button">Create game</button>
+            <button class="secondary-button" data-action="show-join" type="button">Join by code</button>
+          </div>
+        </div>
+        <div class="hero-board" aria-hidden="true">
+          <div class="mini-card teal"></div>
+          <div class="mini-card rose flipped"></div>
+          <div class="mini-card gold"></div>
+          <div class="mini-card ink"></div>
+          <div class="mini-card mint flipped"></div>
+          <div class="mini-card coral"></div>
+        </div>
+      </section>
+
+      <section class="quick-panel" id="quickPanel"></section>
+    </template>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,1044 @@
+const STORAGE_KEY = "friend-who.games.v1";
+const SESSION_KEY = "friend-who.player.v1";
+const MAX_ROSTER = 20;
+const MIN_ROSTER = 10;
+
+const demoPeople = [
+  ["Maya", "teal", ["glasses", "curly hair", "blue shirt"]],
+  ["Jordan", "rose", ["beard", "hat", "brown hair"]],
+  ["Priya", "gold", ["glasses", "black hair", "green shirt"]],
+  ["Nate", "mint", ["beard", "red shirt", "short hair"]],
+  ["Sam", "coral", ["blonde hair", "earrings", "striped shirt"]],
+  ["Avery", "sky", ["hat", "long hair", "yellow shirt"]],
+  ["Quinn", "lavender", ["glasses", "gray hoodie", "short hair"]],
+  ["Riley", "lime", ["brown hair", "blue shirt", "smiling"]],
+  ["Taylor", "peach", ["beard", "black shirt", "short hair"]],
+  ["Morgan", "navy", ["curly hair", "earrings", "pink shirt"]],
+  ["Casey", "brick", ["blonde hair", "hat", "white shirt"]],
+  ["Jamie", "green", ["glasses", "long hair", "orange shirt"]]
+];
+
+const colors = {
+  teal: "#49aab2",
+  rose: "#e6827f",
+  gold: "#e8b442",
+  mint: "#7bb98f",
+  coral: "#ee9472",
+  sky: "#88b7dc",
+  lavender: "#b39ad9",
+  lime: "#a8c66c",
+  peach: "#f0b487",
+  navy: "#71869b",
+  brick: "#c86d58",
+  green: "#73ad7a"
+};
+
+const state = {
+  mode: "home",
+  activeCode: null,
+  playerId: null,
+  draftRoster: [],
+  toastTimer: null
+};
+
+const app = document.querySelector("#app");
+const homeTemplate = document.querySelector("#homeTemplate");
+
+init();
+
+function init() {
+  state.draftRoster = makeBlankRoster(10);
+  const url = new URL(window.location.href);
+  const code = normalizeCode(url.searchParams.get("code") || "");
+  const urlPlayerId = url.searchParams.get("player");
+  const storedPlayerId = urlPlayerId || (code ? null : sessionStorage.getItem(SESSION_KEY));
+
+  if (code && getGame(code)) {
+    state.activeCode = code;
+    state.playerId = storedPlayerId;
+    state.mode = storedPlayerId && getPlayer(getGame(code), storedPlayerId) ? "lobby" : "join";
+  }
+
+  document.querySelector("#homeButton").addEventListener("click", () => {
+    state.mode = "home";
+    state.activeCode = null;
+    setUrlState(null);
+    render();
+  });
+
+  document.querySelector("#resetButton").addEventListener("click", () => {
+    if (confirm("Clear saved demo games from this browser?")) {
+      localStorage.removeItem(STORAGE_KEY);
+      sessionStorage.removeItem(SESSION_KEY);
+      state.activeCode = null;
+      state.playerId = null;
+      state.mode = "home";
+      setUrlState(null);
+      render();
+      toast("Saved games cleared");
+    }
+  });
+
+  window.addEventListener("storage", (event) => {
+    if (event.key === STORAGE_KEY) render();
+  });
+
+  render();
+}
+
+function render() {
+  const game = state.activeCode ? getGame(state.activeCode) : null;
+
+  if (game?.started && state.mode !== "join") {
+    state.mode = "game";
+  }
+
+  if (state.mode === "create") return renderCreate();
+  if (state.mode === "join") return renderJoin();
+  if (state.mode === "lobby") return renderLobby();
+  if (state.mode === "game") return renderGame();
+  renderHome();
+}
+
+function renderHome() {
+  app.innerHTML = "";
+  app.append(homeTemplate.content.cloneNode(true));
+
+  document.querySelector("[data-action='show-create']").addEventListener("click", () => {
+    state.mode = "create";
+    render();
+  });
+
+  document.querySelector("[data-action='show-join']").addEventListener("click", () => {
+    state.mode = "join";
+    render();
+  });
+
+  const games = Object.values(loadGames()).sort((a, b) => b.createdAt - a.createdAt);
+  const quickPanel = document.querySelector("#quickPanel");
+
+  quickPanel.innerHTML = `
+    <div class="screen-header">
+      <div>
+        <h2>Saved rooms</h2>
+        <p>Rooms are saved locally in this browser for quick testing and party setup.</p>
+      </div>
+      <button class="secondary-button" data-action="show-create" type="button">New room</button>
+    </div>
+    ${
+      games.length
+        ? `<div class="roster-preview">${games
+            .slice(0, 6)
+            .map(
+              (game) => `
+                <button class="roster-card" data-open-game="${game.code}" type="button">
+                  <div class="avatar">${game.roster.slice(0, 1).map(personImage).join("")}</div>
+                  <strong>${escapeHtml(game.title)} - ${game.code}</strong>
+                </button>`
+            )
+            .join("")}</div>`
+        : `<div class="empty-state">No saved rooms yet. Create a custom board or load the demo roster to start fast.</div>`
+    }
+  `;
+
+  quickPanel.querySelector("[data-action='show-create']").addEventListener("click", () => {
+    state.mode = "create";
+    render();
+  });
+
+  quickPanel.querySelectorAll("[data-open-game]").forEach((button) => {
+    button.addEventListener("click", () => openGame(button.dataset.openGame));
+  });
+}
+
+function renderCreate() {
+  app.innerHTML = `
+    <section class="screen">
+      <div class="screen-header">
+        <div>
+          <p class="eyebrow">Create private game</p>
+          <h2>Build the face board.</h2>
+          <p>Add 10-20 people with a name and photo. Use the demo roster when you want to play immediately.</p>
+        </div>
+        <button class="secondary-button" data-action="home" type="button">Back</button>
+      </div>
+
+      <div class="form-grid">
+        <form class="panel form-card" id="createForm">
+          <div class="field-group">
+            <label for="gameTitle">Game name</label>
+            <input id="gameTitle" name="gameTitle" autocomplete="off" value="Saturday Face-Off" required />
+          </div>
+          <div class="field-group">
+            <label for="hostName">Your name</label>
+            <input id="hostName" name="hostName" autocomplete="name" placeholder="Host player" required />
+          </div>
+
+          <div class="upload-toolbar">
+            <span class="counter-pill" id="rosterCounter"></span>
+            <div class="template-actions">
+              <button class="secondary-button" data-action="demo-roster" type="button">Use demo board</button>
+              <button class="secondary-button" data-action="add-person" type="button">Add person</button>
+            </div>
+          </div>
+
+          <div class="people-editor" id="peopleEditor"></div>
+
+          <div class="form-actions" style="margin-top: 16px">
+            <button class="primary-button" type="submit">Create room</button>
+            <button class="ghost-button" data-action="clear-roster" type="button">Clear roster</button>
+          </div>
+        </form>
+
+        <aside class="panel form-card">
+          <h3>Room rules</h3>
+          <ul class="tip-list" style="margin-top: 14px">
+            <li>Two or more players can join with the same code.</li>
+            <li>Each player receives a secret person when the host starts.</li>
+            <li>Ask one yes/no question, answer, then the turn moves on.</li>
+            <li>A wrong final guess gives the win to your opponent.</li>
+          </ul>
+        </aside>
+      </div>
+    </section>
+  `;
+
+  bindBackButtons();
+  renderPeopleEditor();
+
+  document.querySelector("[data-action='demo-roster']").addEventListener("click", () => {
+    state.draftRoster = demoPeople.map(([name, color, tags], index) => ({
+      id: makeId("person"),
+      name,
+      photo: avatarSvg(name, color, index),
+      tags
+    }));
+    renderPeopleEditor();
+  });
+
+  document.querySelector("[data-action='add-person']").addEventListener("click", () => {
+    if (state.draftRoster.length >= MAX_ROSTER) {
+      toast("Maximum board size is 20 people");
+      return;
+    }
+    state.draftRoster.push(blankPerson());
+    renderPeopleEditor();
+  });
+
+  document.querySelector("[data-action='clear-roster']").addEventListener("click", () => {
+    state.draftRoster = makeBlankRoster(10);
+    renderPeopleEditor();
+  });
+
+  document.querySelector("#createForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    createGame(new FormData(event.currentTarget));
+  });
+}
+
+function renderPeopleEditor() {
+  const editor = document.querySelector("#peopleEditor");
+  const counter = document.querySelector("#rosterCounter");
+  if (!editor || !counter) return;
+
+  const readyCount = validRoster(state.draftRoster).length;
+  counter.textContent = `${readyCount}/${MIN_ROSTER} ready - ${state.draftRoster.length}/${MAX_ROSTER} slots`;
+
+  editor.innerHTML = state.draftRoster
+    .map(
+      (person, index) => `
+        <div class="person-row" data-person-row="${person.id}">
+          <label class="photo-slot" title="Upload photo">
+            ${person.photo ? `<img src="${person.photo}" alt="" />` : `<span>Photo</span>`}
+            <input data-photo-index="${index}" type="file" accept="image/*" aria-label="Upload photo for person ${index + 1}" />
+          </label>
+          <input data-name-index="${index}" value="${escapeAttr(person.name)}" placeholder="Person ${index + 1} name" aria-label="Person ${index + 1} name" />
+          <button class="small-icon-button" data-remove-index="${index}" type="button" title="Remove person" aria-label="Remove person">x</button>
+        </div>`
+    )
+    .join("");
+
+  editor.querySelectorAll("[data-name-index]").forEach((input) => {
+    input.addEventListener("input", (event) => {
+      state.draftRoster[Number(event.target.dataset.nameIndex)].name = event.target.value;
+      const ready = validRoster(state.draftRoster).length;
+      counter.textContent = `${ready}/${MIN_ROSTER} ready - ${state.draftRoster.length}/${MAX_ROSTER} slots`;
+    });
+  });
+
+  editor.querySelectorAll("[data-photo-index]").forEach((input) => {
+    input.addEventListener("change", async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const dataUrl = await readFile(file);
+      state.draftRoster[Number(event.target.dataset.photoIndex)].photo = dataUrl;
+      renderPeopleEditor();
+    });
+  });
+
+  editor.querySelectorAll("[data-remove-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (state.draftRoster.length <= MIN_ROSTER) {
+        toast("Keep at least 10 slots");
+        return;
+      }
+      state.draftRoster.splice(Number(button.dataset.removeIndex), 1);
+      renderPeopleEditor();
+    });
+  });
+}
+
+function renderJoin() {
+  const codeFromUrl = state.activeCode || normalizeCode(new URL(window.location.href).searchParams.get("code") || "");
+  app.innerHTML = `
+    <section class="screen">
+      <div class="screen-header">
+        <div>
+          <p class="eyebrow">Join private game</p>
+          <h2>Enter the room code.</h2>
+          <p>Use the invite link or paste the six-character code from the host.</p>
+        </div>
+        <button class="secondary-button" data-action="home" type="button">Back</button>
+      </div>
+
+      <form class="panel form-card" id="joinForm" style="max-width: 620px">
+        <div class="field-group">
+          <label for="joinCode">Room code</label>
+          <input id="joinCode" name="joinCode" value="${escapeAttr(codeFromUrl)}" autocomplete="off" maxlength="6" required />
+        </div>
+        <div class="field-group">
+          <label for="playerName">Your name</label>
+          <input id="playerName" name="playerName" autocomplete="name" required />
+        </div>
+        <div class="form-actions">
+          <button class="primary-button" type="submit">Join lobby</button>
+        </div>
+      </form>
+    </section>
+  `;
+
+  bindBackButtons();
+  document.querySelector("#joinForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    joinGame(new FormData(event.currentTarget));
+  });
+}
+
+function renderLobby() {
+  const game = getGame(state.activeCode);
+  if (!game) {
+    state.mode = "join";
+    return render();
+  }
+
+  const player = getPlayer(game, state.playerId);
+  if (!player) {
+    state.mode = "join";
+    return render();
+  }
+
+  const isHost = game.hostId === player.id;
+  const invite = makeInviteLink(game.code);
+
+  app.innerHTML = `
+    <section class="screen">
+      <div class="screen-header">
+        <div>
+          <p class="eyebrow">Lobby</p>
+          <h2>${escapeHtml(game.title)}</h2>
+          <p>${game.roster.length} people on the board - ${game.players.length} players joined</p>
+        </div>
+        <span class="status-pill">${isHost ? "Host" : "Guest"} - ${escapeHtml(player.name)}</span>
+      </div>
+
+      <div class="lobby-grid">
+        <div class="panel form-card">
+          <div class="invite-box">
+            <label>Game code</label>
+            <div class="code-row">
+              <span class="game-code">${game.code}</span>
+              <button class="secondary-button" data-action="copy-code" type="button">Copy code</button>
+              <button class="secondary-button" data-action="copy-link" type="button">Copy invite</button>
+            </div>
+            <input value="${escapeAttr(invite)}" readonly aria-label="Invite link" />
+          </div>
+
+          <div class="lobby-actions" style="margin-top: 16px">
+            ${
+              isHost
+                ? `<button class="primary-button" data-action="start-game" type="button" ${game.players.length < 2 ? "disabled" : ""}>Start game</button>`
+                : `<span class="counter-pill">Waiting for host</span>`
+            }
+            <button class="secondary-button" data-action="join-another" type="button">Join as another player</button>
+          </div>
+
+          <h3 style="margin-top: 22px">Players</h3>
+          <div class="player-list" style="margin-top: 10px">
+            ${game.players
+              .map(
+                (item) => `
+                  <div class="player-item">
+                    <strong>${escapeHtml(item.name)}</strong>
+                    <span class="status-pill">${item.id === game.hostId ? "Host" : "Ready"}</span>
+                  </div>`
+              )
+              .join("")}
+          </div>
+        </div>
+
+        <div class="panel form-card">
+          <h3>Board preview</h3>
+          <div class="roster-preview" style="margin-top: 12px">
+            ${game.roster.map(renderRosterCard).join("")}
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+
+  document.querySelector("[data-action='copy-code']").addEventListener("click", () => copyText(game.code));
+  document.querySelector("[data-action='copy-link']").addEventListener("click", () => copyText(invite));
+  document.querySelector("[data-action='join-another']").addEventListener("click", () => {
+    state.playerId = null;
+    sessionStorage.removeItem(SESSION_KEY);
+    setUrlState(game.code);
+    state.mode = "join";
+    render();
+  });
+
+  const startButton = document.querySelector("[data-action='start-game']");
+  if (startButton) {
+    startButton.addEventListener("click", () => startGame(game.code));
+  }
+}
+
+function renderGame() {
+  const game = getGame(state.activeCode);
+  if (!game) {
+    state.mode = "home";
+    return render();
+  }
+
+  const player = getPlayer(game, state.playerId);
+  if (!player) {
+    state.mode = "join";
+    return render();
+  }
+
+  const target = game.roster.find((person) => person.id === game.targets[player.id]);
+  const eliminated = new Set(game.eliminations[player.id] || []);
+  const currentPlayer = getPlayer(game, game.turnPlayerId);
+  const isMyTurn = game.turnPlayerId === player.id;
+  const opponent = firstOpponent(game, player.id);
+  const pending = game.pendingQuestion;
+  const canAsk = isMyTurn && !pending && !game.winnerId;
+  const canAnswer = pending && pending.from !== player.id && !game.winnerId;
+  const winner = game.winnerId ? getPlayer(game, game.winnerId) : null;
+
+  app.innerHTML = `
+    <section class="screen">
+      <div class="screen-header">
+        <div>
+          <p class="eyebrow">Room ${game.code}</p>
+          <h2>${escapeHtml(game.title)}</h2>
+          <p>${currentPlayer ? `Turn: ${escapeHtml(currentPlayer.name)}` : "Turn order loading"}</p>
+        </div>
+        <span class="turn-pill ${isMyTurn ? "active" : ""}">${isMyTurn ? "Your turn" : "Opponent turn"}</span>
+      </div>
+
+      ${
+        winner
+          ? `<div class="result-banner" style="margin-bottom: 18px">
+              <h3>${escapeHtml(winner.name)} wins!</h3>
+              <div class="game-actions">
+                <button class="primary-button" data-action="rematch" type="button">Rematch</button>
+                <button class="secondary-button" data-action="back-lobby" type="button">Lobby</button>
+              </div>
+            </div>`
+          : ""
+      }
+
+      <div class="game-layout">
+        <div class="board-shell">
+          <div class="game-meta">
+            <div class="target-card">
+              <div class="target-avatar">${target ? personImage(target) : ""}</div>
+              <div>
+                <h3>Your secret person</h3>
+                <p>${target ? escapeHtml(target.name) : "Assigned when the game starts."}</p>
+              </div>
+            </div>
+            <button class="secondary-button" data-action="clear-eliminations" type="button">Lift all tiles</button>
+          </div>
+
+          <div class="board-grid">
+            ${game.roster
+              .map(
+                (person) => `
+                  <button class="face-card ${eliminated.has(person.id) ? "eliminated" : ""}" data-face-id="${person.id}" type="button" aria-pressed="${eliminated.has(person.id)}">
+                    <div class="avatar">${personImage(person)}</div>
+                    <span class="face-name">${escapeHtml(person.name)}</span>
+                  </button>`
+              )
+              .join("")}
+          </div>
+        </div>
+
+        <aside class="side-panel">
+          <div class="panel form-card">
+            <h3>Ask</h3>
+            <div class="question-bank" style="margin-top: 10px">
+              ${questionSuggestions(game.roster).map((question) => `<button class="question-chip" data-question="${escapeAttr(question)}" type="button">${escapeHtml(question)}</button>`).join("")}
+            </div>
+            <form id="questionForm" style="margin-top: 12px">
+              <textarea name="question" placeholder="Ask a yes/no question" ${canAsk ? "" : "disabled"}></textarea>
+              <div class="chat-actions" style="margin-top: 8px">
+                <button class="primary-button" type="submit" ${canAsk ? "" : "disabled"}>Send question</button>
+              </div>
+            </form>
+            ${
+              pending
+                ? `<div class="empty-state" style="margin-top: 12px">
+                    <strong>${escapeHtml(getPlayer(game, pending.from)?.name || "Player")} asked:</strong>
+                    <div>${escapeHtml(pending.text)}</div>
+                    ${
+                      canAnswer
+                        ? `<div class="chat-actions" style="margin-top: 10px">
+                            <button class="primary-button" data-answer="Yes" type="button">Yes</button>
+                            <button class="secondary-button" data-answer="No" type="button">No</button>
+                          </div>`
+                        : ""
+                    }
+                  </div>`
+                : ""
+            }
+          </div>
+
+          <div class="panel form-card">
+            <h3>Guess</h3>
+            <form id="guessForm" style="margin-top: 10px">
+              <select name="guess" ${isMyTurn && !pending && !game.winnerId ? "" : "disabled"}>
+                ${game.roster.map((person) => `<option value="${person.id}">${escapeHtml(person.name)}</option>`).join("")}
+              </select>
+              <button class="danger-button" style="width: 100%; margin-top: 8px" type="submit" ${isMyTurn && !pending && !game.winnerId ? "" : "disabled"}>Final guess</button>
+            </form>
+          </div>
+
+          <div class="panel form-card">
+            <h3>Chat</h3>
+            <div class="chat-log" style="margin-top: 10px">
+              ${
+                game.events.length
+                  ? game.events
+                      .slice(-12)
+                      .map(
+                        (event) => `
+                          <div class="chat-message ${event.playerId === player.id ? "mine" : ""}">
+                            <small>${escapeHtml(event.playerName)} - ${event.label}</small>
+                            <span>${escapeHtml(event.text)}</span>
+                          </div>`
+                      )
+                      .join("")
+                  : `<div class="empty-state">No questions yet.</div>`
+              }
+            </div>
+            <form id="chatForm" style="margin-top: 10px">
+              <input name="message" placeholder="Table talk" autocomplete="off" />
+              <button class="secondary-button" style="width: 100%; margin-top: 8px" type="submit">Send chat</button>
+            </form>
+          </div>
+        </aside>
+      </div>
+    </section>
+  `;
+
+  document.querySelectorAll("[data-face-id]").forEach((button) => {
+    button.addEventListener("click", () => toggleEliminated(game.code, player.id, button.dataset.faceId));
+  });
+
+  document.querySelector("[data-action='clear-eliminations']").addEventListener("click", () => {
+    mutateGame(game.code, (draft) => {
+      draft.eliminations[player.id] = [];
+    });
+  });
+
+  document.querySelectorAll("[data-question]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = document.querySelector("#questionForm textarea");
+      input.value = button.dataset.question;
+      input.focus();
+    });
+  });
+
+  document.querySelector("#questionForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = new FormData(event.currentTarget).get("question").trim();
+    if (text) sendQuestion(game.code, player.id, text);
+  });
+
+  document.querySelectorAll("[data-answer]").forEach((button) => {
+    button.addEventListener("click", () => answerQuestion(game.code, player.id, button.dataset.answer));
+  });
+
+  document.querySelector("#guessForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const guess = new FormData(event.currentTarget).get("guess");
+    makeGuess(game.code, player.id, guess);
+  });
+
+  document.querySelector("#chatForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const message = new FormData(event.currentTarget).get("message").trim();
+    if (message) sendChat(game.code, player.id, message);
+  });
+
+  document.querySelector("[data-action='rematch']")?.addEventListener("click", () => rematch(game.code));
+  document.querySelector("[data-action='back-lobby']")?.addEventListener("click", () => {
+    state.mode = "lobby";
+    render();
+  });
+}
+
+function createGame(formData) {
+  const roster = validRoster(state.draftRoster);
+  if (roster.length < MIN_ROSTER) {
+    toast("Add at least 10 named photos");
+    return;
+  }
+
+  const hostName = String(formData.get("hostName") || "").trim();
+  const title = String(formData.get("gameTitle") || "").trim();
+  if (!hostName || !title) {
+    toast("Game name and host name are required");
+    return;
+  }
+
+  const playerId = makeId("player");
+  const code = uniqueCode();
+  const game = {
+    code,
+    title,
+    hostId: playerId,
+    createdAt: Date.now(),
+    roster,
+    players: [{ id: playerId, name: hostName, joinedAt: Date.now(), wins: 0 }],
+    started: false,
+    turnPlayerId: null,
+    targets: {},
+    eliminations: { [playerId]: [] },
+    pendingQuestion: null,
+    winnerId: null,
+    events: []
+  };
+
+  const games = loadGames();
+  games[code] = game;
+  saveGames(games);
+
+  state.activeCode = code;
+  state.playerId = playerId;
+  state.mode = "lobby";
+  sessionStorage.setItem(SESSION_KEY, playerId);
+  setUrlState(code, playerId);
+  render();
+}
+
+function joinGame(formData) {
+  const code = normalizeCode(formData.get("joinCode"));
+  const name = String(formData.get("playerName") || "").trim();
+  const game = getGame(code);
+
+  if (!game) {
+    toast("Room code not found");
+    return;
+  }
+
+  if (!name) {
+    toast("Enter your player name");
+    return;
+  }
+
+  if (game.started) {
+    toast("That game already started");
+    return;
+  }
+
+  const playerId = makeId("player");
+  mutateGame(code, (draft) => {
+    draft.players.push({ id: playerId, name, joinedAt: Date.now(), wins: 0 });
+    draft.eliminations[playerId] = [];
+  });
+
+  state.activeCode = code;
+  state.playerId = playerId;
+  state.mode = "lobby";
+  sessionStorage.setItem(SESSION_KEY, playerId);
+  setUrlState(code, playerId);
+  render();
+}
+
+function startGame(code) {
+  const game = getGame(code);
+  if (!game || game.players.length < 2) {
+    toast("Need at least two players");
+    return;
+  }
+
+  mutateGame(code, (draft) => {
+    const shuffled = shuffle([...draft.roster]);
+    draft.players.forEach((player, index) => {
+      draft.targets[player.id] = shuffled[index % shuffled.length].id;
+      draft.eliminations[player.id] = [];
+    });
+    draft.started = true;
+    draft.turnPlayerId = draft.players[0].id;
+    draft.pendingQuestion = null;
+    draft.winnerId = null;
+    draft.events.unshift(systemEvent(draft.players[0], "Game started", `${draft.players[0].name} asks first.`));
+  });
+
+  state.mode = "game";
+  render();
+}
+
+function sendQuestion(code, playerId, text) {
+  mutateGame(code, (draft) => {
+    if (draft.turnPlayerId !== playerId || draft.pendingQuestion || draft.winnerId) return;
+    const player = getPlayer(draft, playerId);
+    const id = makeId("question");
+    draft.pendingQuestion = { id, from: playerId, text, at: Date.now() };
+    draft.events.push({
+      id,
+      playerId,
+      playerName: player.name,
+      label: "Question",
+      text,
+      at: Date.now()
+    });
+  });
+}
+
+function answerQuestion(code, playerId, answer) {
+  mutateGame(code, (draft) => {
+    if (!draft.pendingQuestion || draft.pendingQuestion.from === playerId || draft.winnerId) return;
+    const player = getPlayer(draft, playerId);
+    draft.events.push({
+      id: makeId("answer"),
+      playerId,
+      playerName: player.name,
+      label: "Answer",
+      text: answer,
+      at: Date.now()
+    });
+    draft.pendingQuestion = null;
+    draft.turnPlayerId = nextPlayerId(draft, draft.turnPlayerId);
+  });
+}
+
+function sendChat(code, playerId, text) {
+  mutateGame(code, (draft) => {
+    const player = getPlayer(draft, playerId);
+    draft.events.push({
+      id: makeId("chat"),
+      playerId,
+      playerName: player.name,
+      label: "Chat",
+      text,
+      at: Date.now()
+    });
+  });
+}
+
+function makeGuess(code, playerId, guessPersonId) {
+  mutateGame(code, (draft) => {
+    if (draft.turnPlayerId !== playerId || draft.pendingQuestion || draft.winnerId) return;
+    const player = getPlayer(draft, playerId);
+    const opponent = firstOpponent(draft, playerId);
+    if (!opponent) return;
+
+    const guessed = draft.roster.find((person) => person.id === guessPersonId);
+    const correct = draft.targets[opponent.id] === guessPersonId;
+    draft.winnerId = correct ? playerId : opponent.id;
+    const winner = getPlayer(draft, draft.winnerId);
+    winner.wins = (winner.wins || 0) + 1;
+    draft.events.push({
+      id: makeId("guess"),
+      playerId,
+      playerName: player.name,
+      label: "Guess",
+      text: `${guessed?.name || "Someone"} was ${correct ? "correct" : "wrong"}.`,
+      at: Date.now()
+    });
+  });
+}
+
+function rematch(code) {
+  mutateGame(code, (draft) => {
+    const shuffled = shuffle([...draft.roster]);
+    draft.players.forEach((player, index) => {
+      draft.targets[player.id] = shuffled[index % shuffled.length].id;
+      draft.eliminations[player.id] = [];
+    });
+    draft.started = true;
+    draft.turnPlayerId = draft.players[0].id;
+    draft.pendingQuestion = null;
+    draft.winnerId = null;
+    draft.events = [systemEvent(draft.players[0], "Rematch", `${draft.players[0].name} asks first.`)];
+  });
+}
+
+function toggleEliminated(code, playerId, personId) {
+  mutateGame(code, (draft) => {
+    const existing = new Set(draft.eliminations[playerId] || []);
+    if (existing.has(personId)) existing.delete(personId);
+    else existing.add(personId);
+    draft.eliminations[playerId] = [...existing];
+  });
+}
+
+function openGame(code) {
+  const game = getGame(code);
+  state.activeCode = code;
+  setUrlState(code);
+  const sessionPlayer = sessionStorage.getItem(SESSION_KEY);
+  state.playerId = sessionPlayer && getPlayer(game, sessionPlayer) ? sessionPlayer : null;
+  if (state.playerId) setUrlState(code, state.playerId);
+  state.mode = state.playerId ? (game.started ? "game" : "lobby") : "join";
+  render();
+}
+
+function validRoster(roster) {
+  return roster
+    .filter((person) => person.name.trim() && person.photo)
+    .slice(0, MAX_ROSTER)
+    .map((person) => ({
+      id: person.id || makeId("person"),
+      name: person.name.trim(),
+      photo: person.photo,
+      tags: person.tags || []
+    }));
+}
+
+function blankPerson() {
+  return { id: makeId("person"), name: "", photo: "", tags: [] };
+}
+
+function makeBlankRoster(count) {
+  return Array.from({ length: count }, blankPerson);
+}
+
+function renderRosterCard(person) {
+  return `
+    <div class="roster-card">
+      <div class="avatar">${personImage(person)}</div>
+      <strong>${escapeHtml(person.name)}</strong>
+    </div>
+  `;
+}
+
+function personImage(person) {
+  return `<img src="${person.photo}" alt="${escapeAttr(person.name)}" />`;
+}
+
+function questionSuggestions(roster) {
+  const tags = new Set(roster.flatMap((person) => person.tags || []));
+  const suggestions = [
+    "Does your person wear glasses?",
+    "Does your person have a hat?",
+    "Does your person have facial hair?",
+    "Does your person have blonde hair?",
+    "Is your person wearing a blue shirt?",
+    "Does your person have long hair?"
+  ];
+
+  if (tags.has("beard")) suggestions.unshift("Does your person have a beard?");
+  if (tags.has("curly hair")) suggestions.unshift("Does your person have curly hair?");
+  if (tags.has("earrings")) suggestions.unshift("Does your person wear earrings?");
+
+  return [...new Set(suggestions)].slice(0, 7);
+}
+
+function makeInviteLink(code) {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("code", code);
+  return url.toString();
+}
+
+function setUrlState(code, playerId = null) {
+  const url = new URL(window.location.href);
+  if (code) url.searchParams.set("code", code);
+  else url.searchParams.delete("code");
+  if (playerId) url.searchParams.set("player", playerId);
+  else url.searchParams.delete("player");
+  window.history.replaceState({}, "", url);
+}
+
+function loadGames() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveGames(games) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(games));
+}
+
+function getGame(code) {
+  return loadGames()[normalizeCode(code)];
+}
+
+function mutateGame(code, mutator) {
+  const games = loadGames();
+  const normalized = normalizeCode(code);
+  const game = games[normalized];
+  if (!game) return;
+  mutator(game);
+  games[normalized] = game;
+  saveGames(games);
+  render();
+}
+
+function uniqueCode() {
+  const games = loadGames();
+  let code = "";
+  do {
+    code = Array.from({ length: 6 }, () => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(Math.random() * 32)]).join("");
+  } while (games[code]);
+  return code;
+}
+
+function normalizeCode(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 6);
+}
+
+function makeId(prefix) {
+  return `${prefix}-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+}
+
+function getPlayer(game, playerId) {
+  return game?.players.find((player) => player.id === playerId);
+}
+
+function firstOpponent(game, playerId) {
+  return game.players.find((player) => player.id !== playerId);
+}
+
+function nextPlayerId(game, currentId) {
+  const index = game.players.findIndex((player) => player.id === currentId);
+  return game.players[(index + 1) % game.players.length].id;
+}
+
+function shuffle(items) {
+  for (let index = items.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [items[index], items[swapIndex]] = [items[swapIndex], items[index]];
+  }
+  return items;
+}
+
+function systemEvent(player, label, text) {
+  return {
+    id: makeId("system"),
+    playerId: player.id,
+    playerName: "Room",
+    label,
+    text,
+    at: Date.now()
+  };
+}
+
+function readFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Copied");
+  } catch {
+    toast(text);
+  }
+}
+
+function toast(message) {
+  clearTimeout(state.toastTimer);
+  document.querySelector(".toast")?.remove();
+  const node = document.createElement("div");
+  node.className = "toast";
+  node.textContent = message;
+  document.body.append(node);
+  state.toastTimer = setTimeout(() => node.remove(), 2200);
+}
+
+function bindBackButtons() {
+  document.querySelectorAll("[data-action='home']").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.mode = "home";
+      state.activeCode = null;
+      setUrlState(null);
+      render();
+    });
+  });
+}
+
+function avatarSvg(name, colorKey, index) {
+  const bg = colors[colorKey] || colors.teal;
+  const hairColors = ["#2c211f", "#6c412c", "#d7a84f", "#1f2b2f"];
+  const shirtColors = ["#f7f4ee", "#0e7c86", "#d95f59", "#e6a532", "#1d2528"];
+  const hair = hairColors[index % hairColors.length];
+  const shirt = shirtColors[index % shirtColors.length];
+  const initials = name
+    .split(/\s+/)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+  const glasses = index % 3 === 0;
+  const beard = index % 4 === 1;
+  const hat = index % 5 === 0;
+  const earrings = index % 5 === 4;
+
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 220">
+      <rect width="220" height="220" fill="${bg}"/>
+      <circle cx="110" cy="96" r="54" fill="#ffd9b3"/>
+      <path d="M56 96c7-42 31-64 73-56 28 5 43 24 47 56-24-23-63-30-120 0z" fill="${hair}"/>
+      ${hat ? `<path d="M54 54h92c16 0 30 13 30 30H76c-12 0-22-10-22-22v-8z" fill="#1d2528"/><rect x="48" y="80" width="128" height="15" rx="7" fill="#e6a532"/>` : ""}
+      <circle cx="88" cy="98" r="5" fill="#1d2528"/>
+      <circle cx="132" cy="98" r="5" fill="#1d2528"/>
+      ${glasses ? `<circle cx="88" cy="98" r="16" fill="none" stroke="#1d2528" stroke-width="5"/><circle cx="132" cy="98" r="16" fill="none" stroke="#1d2528" stroke-width="5"/><path d="M104 98h12" stroke="#1d2528" stroke-width="5"/>` : ""}
+      <path d="M93 124c13 10 29 10 42 0" fill="none" stroke="#1d2528" stroke-width="6" stroke-linecap="round"/>
+      ${beard ? `<path d="M75 122c16 38 64 38 80 0-11 47-69 48-80 0z" fill="${hair}" opacity=".9"/>` : ""}
+      ${earrings ? `<circle cx="58" cy="117" r="6" fill="#e6a532"/><circle cx="162" cy="117" r="6" fill="#e6a532"/>` : ""}
+      <path d="M45 220c7-47 37-72 65-72s58 25 65 72H45z" fill="${shirt}"/>
+      <text x="110" y="196" text-anchor="middle" font-size="28" font-weight="800" font-family="Arial, sans-serif" fill="${shirt === "#1d2528" ? "#fff" : "#1d2528"}">${initials}</text>
+    </svg>`;
+
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/`/g, "&#096;");
+}
