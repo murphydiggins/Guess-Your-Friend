@@ -498,6 +498,25 @@ select:focus {
   line-height: 1.4;
 }
 
+.instruction-card {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  border: 1px solid rgba(14, 124, 134, 0.28);
+  border-radius: 8px;
+  background: rgba(14, 124, 134, 0.08);
+  padding: 14px;
+}
+
+.instruction-card ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
 .invite-box {
   display: grid;
   gap: 10px;
@@ -586,6 +605,77 @@ select:focus {
   align-items: start;
 }
 
+.turn-status,
+.top-question-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  padding: 13px 14px;
+  margin-bottom: 14px;
+  box-shadow: 4px 4px 0 var(--ink);
+}
+
+.turn-status {
+  background: #fff;
+}
+
+.turn-status strong,
+.turn-status span,
+.top-question-banner small,
+.top-question-banner strong {
+  display: block;
+}
+
+.turn-status span {
+  margin-top: 3px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.turn-status.active {
+  background: rgba(14, 124, 134, 0.12);
+}
+
+.turn-status.answer {
+  background: #fff7d9;
+}
+
+.turn-status.waiting {
+  border-color: #8b969b;
+  box-shadow: 4px 4px 0 #8b969b;
+}
+
+.turn-status.won {
+  background: rgba(123, 185, 143, 0.22);
+}
+
+.turn-status.lost {
+  background: rgba(217, 95, 89, 0.13);
+}
+
+.top-question-banner {
+  position: sticky;
+  top: 82px;
+  z-index: 24;
+  background: var(--gold);
+}
+
+.top-question-banner small {
+  margin-bottom: 4px;
+  color: rgba(29, 37, 40, 0.72);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.top-question-banner strong {
+  font-size: 18px;
+  line-height: 1.25;
+}
+
 .board-shell {
   display: grid;
   gap: 12px;
@@ -606,6 +696,8 @@ select:focus {
 }
 
 .face-card {
+  --swipe-x: 0px;
+  position: relative;
   min-width: 0;
   min-height: 170px;
   display: grid;
@@ -619,10 +711,15 @@ select:focus {
     transform 180ms ease,
     opacity 180ms ease,
     filter 180ms ease;
+  touch-action: pan-y;
 }
 
 .face-card:hover {
   transform: translateY(-2px);
+}
+
+.face-card.swiping {
+  transform: translateX(var(--swipe-x));
 }
 
 .face-card.eliminated {
@@ -635,6 +732,28 @@ select:focus {
 
 .face-card .avatar {
   border-radius: 0;
+}
+
+.swipe-hint {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(14, 124, 134, 0.88);
+  color: white;
+  font-size: 12px;
+  font-weight: 900;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-16px);
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease;
+}
+
+.face-card.swiping .swipe-hint {
+  opacity: 1;
+  transform: translateX(0);
 }
 
 .face-name {
@@ -815,6 +934,16 @@ select:focus {
   .game-actions > *,
   .chat-actions > * {
     flex: 1 1 100%;
+  }
+
+  .turn-status,
+  .top-question-banner {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .top-question-banner {
+    top: 68px;
   }
 
   .person-row {

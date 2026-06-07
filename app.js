@@ -173,7 +173,7 @@ function renderCreate() {
         <div>
           <p class="eyebrow">Create private game</p>
           <h2>Build the face board.</h2>
-          <p>Add 2-20 people with a name and photo. Use the demo roster when you want to play immediately.</p>
+          <p>Import multiple photos at once from your phone, then edit the names before creating the room.</p>
         </div>
         <button class="secondary-button" data-action="home" type="button">Back</button>
       </div>
@@ -192,10 +192,12 @@ function renderCreate() {
           <div class="upload-toolbar">
             <span class="counter-pill" id="rosterCounter"></span>
             <div class="template-actions">
+              <button class="primary-button" data-action="camera-roll" type="button">Import multiple photos</button>
               <button class="secondary-button" data-action="demo-roster" type="button">Use demo board</button>
               <button class="secondary-button" data-action="add-person" type="button">Add person</button>
             </div>
           </div>
+          <input class="hidden" id="cameraRollInput" type="file" accept="image/*" multiple />
 
           <div class="people-editor" id="peopleEditor"></div>
 
@@ -206,12 +208,12 @@ function renderCreate() {
         </form>
 
         <aside class="panel form-card">
-          <h3>Room rules</h3>
+          <h3>Fast setup</h3>
           <ul class="tip-list" style="margin-top: 14px">
+            <li>Tap Import multiple photos to choose several camera roll photos in one pass.</li>
+            <li>Names are guessed from filenames, so edit any that look weird.</li>
             <li>Two or more players can join with the same code.</li>
-            <li>Each player receives a secret person when the host starts.</li>
-            <li>Ask one yes/no question, answer, then the turn moves on.</li>
-            <li>A wrong final guess gives the win to your opponent.</li>
+            <li>The host starts once everyone is in the lobby.</li>
           </ul>
         </aside>
       </div>
@@ -220,6 +222,15 @@ function renderCreate() {
 
   bindBackButtons();
   renderPeopleEditor();
+
+  document.querySelector("[data-action='camera-roll']").addEventListener("click", () => {
+    document.querySelector("#cameraRollInput").click();
+  });
+
+  document.querySelector("#cameraRollInput").addEventListener("change", async (event) => {
+    await importCameraRollPhotos(Array.from(event.target.files || []));
+    event.target.value = "";
+  });
 
   document.querySelector("[data-action='demo-roster']").addEventListener("click", () => {
     state.draftRoster = demoPeople.map(([name, color, tags], index) => ({
@@ -308,6 +319,75 @@ function renderPeopleEditor() {
   });
 }
 
+async function importCameraRollPhotos(files) {
+  const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+  if (!imageFiles.length) {
+    toast("Choose photos from your camera roll");
+    return;
+  }
+
+  const availableSlots = MAX_ROSTER - validRoster(state.draftRoster).length;
+  const selected = imageFiles.slice(0, availableSlots);
+  if (!selected.length) {
+    toast("Maximum board size is 20 people");
+    return;
+  }
+
+  toast(`Importing ${selected.length} photo${selected.length === 1 ? "" : "s"}...`);
+
+  for (const file of selected) {
+    try {
+      const dataUrl = await compressImage(file);
+      upsertImportedPerson({
+        id: makeId("person"),
+        name: nameFromFile(file.name),
+        photo: dataUrl,
+        tags: []
+      });
+    } catch {
+      toast(`Could not import ${file.name}`);
+    }
+  }
+
+  renderPeopleEditor();
+  if (imageFiles.length > selected.length) {
+    toast(`Imported ${selected.length}; board limit is 20`);
+  } else {
+    toast("Photos imported");
+  }
+}
+
+function upsertImportedPerson(person) {
+  const blankIndex = state.draftRoster.findIndex((item) => !item.photo && !item.name.trim());
+  if (blankIndex >= 0) {
+    state.draftRoster[blankIndex] = person;
+    return;
+  }
+
+  const photoOnlyIndex = state.draftRoster.findIndex((item) => !item.photo || !item.name.trim());
+  if (photoOnlyIndex >= 0) {
+    state.draftRoster[photoOnlyIndex] = {
+      ...state.draftRoster[photoOnlyIndex],
+      ...person,
+      name: state.draftRoster[photoOnlyIndex].name.trim() || person.name
+    };
+    return;
+  }
+
+  if (state.draftRoster.length < MAX_ROSTER) {
+    state.draftRoster.push(person);
+  }
+}
+
+function nameFromFile(filename) {
+  const base = filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim();
+  if (!base) return "";
+  return base
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
+}
+
 function renderJoin() {
   const codeFromUrl = state.activeCode || normalizeCode(new URL(window.location.href).searchParams.get("code") || "");
   app.innerHTML = `
@@ -392,6 +472,18 @@ function renderLobby() {
             <button class="secondary-button" data-action="join-another" type="button">Join as another player</button>
           </div>
 
+          <div class="instruction-card">
+            <h3>How to play</h3>
+            <ol>
+              <li>Share the code or invite link with the other player.</li>
+              <li>When everyone has joined, the host taps Start game.</li>
+              <li>Each player gets a secret person from this board.</li>
+              <li>Take turns asking one yes/no question at a time.</li>
+              <li>Swipe right or tap faces to put down people you eliminated.</li>
+              <li>Use Final guess only when you are sure.</li>
+            </ol>
+          </div>
+
           <h3 style="margin-top: 22px">Players</h3>
           <div class="player-list" style="margin-top: 10px">
             ${game.players
@@ -454,6 +546,7 @@ function renderGame() {
   const canAsk = isMyTurn && !pending && !game.winnerId;
   const canAnswer = pending && pending.from !== player.id && !game.winnerId;
   const winner = game.winnerId ? getPlayer(game, game.winnerId) : null;
+  const status = gameStatusText(game, player, currentPlayer, pending, winner);
 
   app.innerHTML = `
     <section class="screen">
@@ -465,6 +558,30 @@ function renderGame() {
         </div>
         <span class="turn-pill ${isMyTurn ? "active" : ""}">${isMyTurn ? "Your turn" : "Opponent turn"}</span>
       </div>
+
+      <div class="turn-status ${status.kind}">
+        <strong>${escapeHtml(status.title)}</strong>
+        <span>${escapeHtml(status.body)}</span>
+      </div>
+
+      ${
+        pending
+          ? `<div class="top-question-banner">
+              <div>
+                <small>${escapeHtml(getPlayer(game, pending.from)?.name || "Player")} asked</small>
+                <strong>${escapeHtml(pending.text)}</strong>
+              </div>
+              ${
+                canAnswer
+                  ? `<div class="chat-actions">
+                      <button class="primary-button" data-answer="Yes" type="button">Yes</button>
+                      <button class="secondary-button" data-answer="No" type="button">No</button>
+                    </div>`
+                  : `<span class="counter-pill">${pending.from === player.id ? "Waiting for answer" : "Question pending"}</span>`
+              }
+            </div>`
+          : ""
+      }
 
       ${
         winner
@@ -497,6 +614,7 @@ function renderGame() {
                 (person) => `
                   <button class="face-card ${eliminated.has(person.id) ? "eliminated" : ""}" data-face-id="${person.id}" type="button" aria-pressed="${eliminated.has(person.id)}">
                     <div class="avatar">${personImage(person)}</div>
+                    <span class="swipe-hint">Swipe right to put down</span>
                     <span class="face-name">${escapeHtml(person.name)}</span>
                   </button>`
               )
@@ -573,7 +691,7 @@ function renderGame() {
   `;
 
   document.querySelectorAll("[data-face-id]").forEach((button) => {
-    button.addEventListener("click", () => toggleEliminated(game.code, player.id, button.dataset.faceId));
+    bindFaceCardControls(button, game.code, player.id);
   });
 
   document.querySelector("[data-action='clear-eliminations']").addEventListener("click", () => {
@@ -616,6 +734,105 @@ function renderGame() {
   document.querySelector("[data-action='back-lobby']")?.addEventListener("click", () => {
     state.mode = "lobby";
     render();
+  });
+}
+
+function gameStatusText(game, player, currentPlayer, pending, winner) {
+  if (winner) {
+    return {
+      kind: winner.id === player.id ? "won" : "lost",
+      title: winner.id === player.id ? "You won!" : `${winner.name} won`,
+      body: "Start a rematch from the banner below."
+    };
+  }
+
+  if (pending?.from === player.id) {
+    return {
+      kind: "waiting",
+      title: "Waiting on their answer",
+      body: "Your question is on the table. They need to tap Yes or No."
+    };
+  }
+
+  if (pending && pending.from !== player.id) {
+    return {
+      kind: "answer",
+      title: "Answer the question",
+      body: "Tap Yes or No so the turn can move on."
+    };
+  }
+
+  if (game.turnPlayerId === player.id) {
+    return {
+      kind: "active",
+      title: "Your turn to ask",
+      body: "Ask one yes/no question, or make a final guess if you are ready."
+    };
+  }
+
+  return {
+    kind: "waiting",
+    title: "Waiting on the other player",
+    body: `${currentPlayer?.name || "The other player"} is choosing a question. Use this time to put down eliminated faces.`
+  };
+}
+
+function bindFaceCardControls(button, code, playerId) {
+  let startX = 0;
+  let startY = 0;
+  let swiped = false;
+
+  button.addEventListener("click", () => {
+    if (swiped) {
+      swiped = false;
+      return;
+    }
+    toggleEliminated(code, playerId, button.dataset.faceId);
+  });
+
+  button.addEventListener(
+    "touchstart",
+    (event) => {
+      const touch = event.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
+      swiped = false;
+      button.style.setProperty("--swipe-x", "0px");
+      button.classList.add("swiping");
+    },
+    { passive: true }
+  );
+
+  button.addEventListener(
+    "touchmove",
+    (event) => {
+      const touch = event.touches[0];
+      const deltaX = Math.max(0, touch.clientX - startX);
+      const deltaY = Math.abs(touch.clientY - startY);
+      if (deltaX > 8 && deltaX > deltaY) {
+        event.preventDefault();
+        button.style.setProperty("--swipe-x", `${Math.min(deltaX, 86)}px`);
+      }
+    },
+    { passive: false }
+  );
+
+  button.addEventListener("touchend", (event) => {
+    const touch = event.changedTouches[0];
+    const deltaX = touch.clientX - startX;
+    const deltaY = Math.abs(touch.clientY - startY);
+    button.classList.remove("swiping");
+    button.style.setProperty("--swipe-x", "0px");
+
+    if (deltaX > 72 && deltaX > deltaY * 1.3) {
+      swiped = true;
+      if (button.getAttribute("aria-pressed") !== "true") {
+        toggleEliminated(code, playerId, button.dataset.faceId);
+      }
+      setTimeout(() => {
+        swiped = false;
+      }, 350);
+    }
   });
 }
 
