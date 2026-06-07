@@ -5,6 +5,7 @@ const MIN_ROSTER = 2;
 const PHOTO_MAX_SIZE = 720;
 const PHOTO_QUALITY = 0.72;
 const SUPABASE_TABLE = "friend_who_games";
+const SYNC_POLL_MS = 2000;
 
 const demoPeople = [
   ["Maya", "teal", ["glasses", "curly hair", "blue shirt"]],
@@ -45,7 +46,9 @@ const state = {
   games: {},
   backend: "local",
   supabase: null,
-  realtimeChannel: null
+  realtimeChannel: null,
+  pollTimer: null,
+  isPolling: false
 };
 
 const app = document.querySelector("#app");
@@ -69,11 +72,13 @@ async function init() {
     state.playerId = storedPlayerId;
     state.mode = storedPlayerId && getPlayer(getGame(code), storedPlayerId) ? "lobby" : "join";
     subscribeToGame(code);
+    startRoomPolling(code);
   }
 
   document.querySelector("#homeButton").addEventListener("click", () => {
     state.mode = "home";
     state.activeCode = null;
+    stopRoomPolling();
     setUrlState(null);
     render();
   });
@@ -85,6 +90,7 @@ async function init() {
       state.activeCode = null;
       state.playerId = null;
       state.mode = "home";
+      stopRoomPolling();
       setUrlState(null);
       render();
       toast("Saved games cleared");
@@ -885,6 +891,7 @@ async function createGame(formData) {
   sessionStorage.setItem(SESSION_KEY, playerId);
   setUrlState(code, playerId);
   subscribeToGame(code);
+  startRoomPolling(code);
   render();
 }
 
@@ -920,6 +927,7 @@ async function joinGame(formData) {
   sessionStorage.setItem(SESSION_KEY, playerId);
   setUrlState(code, playerId);
   subscribeToGame(code);
+  startRoomPolling(code);
   render();
 }
 
@@ -1055,6 +1063,7 @@ async function openGame(code) {
   if (state.playerId) setUrlState(code, state.playerId);
   state.mode = state.playerId ? (game.started ? "game" : "lobby") : "join";
   subscribeToGame(code);
+  startRoomPolling(code);
   render();
 }
 
@@ -1224,6 +1233,48 @@ function subscribeToGame(code) {
     .subscribe();
 }
 
+function startRoomPolling(code) {
+  const normalized = normalizeCode(code);
+  if (state.backend !== "supabase" || !normalized) return;
+  stopRoomPolling();
+  state.pollTimer = window.setInterval(() => pollRoom(normalized), SYNC_POLL_MS);
+}
+
+function stopRoomPolling() {
+  if (state.pollTimer) {
+    window.clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+}
+
+async function pollRoom(code) {
+  if (state.isPolling || state.backend !== "supabase" || state.activeCode !== code) return;
+  state.isPolling = true;
+  const before = gameSignature(getGame(code));
+  const game = await fetchGame(code);
+  const after = gameSignature(game);
+  state.isPolling = false;
+
+  if (before !== after && state.activeCode === code) {
+    render();
+  }
+}
+
+function gameSignature(game) {
+  if (!game) return "";
+  return JSON.stringify({
+    players: game.players?.length || 0,
+    started: game.started,
+    turnPlayerId: game.turnPlayerId,
+    targets: game.targets,
+    eliminations: game.eliminations,
+    pendingQuestion: game.pendingQuestion,
+    winnerId: game.winnerId,
+    events: game.events?.length || 0,
+    lastEvent: game.events?.at?.(-1)?.id || ""
+  });
+}
+
 function normalizeGameState(game) {
   return {
     ...game,
@@ -1374,6 +1425,7 @@ function bindBackButtons() {
     button.addEventListener("click", () => {
       state.mode = "home";
       state.activeCode = null;
+      stopRoomPolling();
       setUrlState(null);
       render();
     });
