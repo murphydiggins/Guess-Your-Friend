@@ -2,8 +2,8 @@ const STORAGE_KEY = "friend-who.games.v1";
 const SESSION_KEY = "friend-who.player.v1";
 const MAX_ROSTER = 20;
 const MIN_ROSTER = 2;
-const PHOTO_MAX_SIZE = 720;
-const PHOTO_QUALITY = 0.72;
+const PHOTO_MAX_SIZE = 520;
+const PHOTO_QUALITY = 0.62;
 const SUPABASE_TABLE = "friend_who_games";
 const SYNC_POLL_MS = 2000;
 
@@ -43,6 +43,7 @@ const state = {
   playerId: null,
   draftRoster: [],
   toastTimer: null,
+  busy: false,
   games: {},
   backend: "local",
   supabase: null,
@@ -59,7 +60,6 @@ init();
 
 async function init() {
   state.draftRoster = makeBlankRoster(MIN_ROSTER);
-  state.games = loadLocalGames();
   await setupBackend();
   const url = new URL(window.location.href);
   const code = normalizeCode(url.searchParams.get("code") || "");
@@ -212,7 +212,7 @@ function renderCreate() {
           <div class="people-editor" id="peopleEditor"></div>
 
           <div class="form-actions" style="margin-top: 16px">
-            <button class="primary-button" type="submit">Create room</button>
+            <button class="primary-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? "Creating..." : "Create room"}</button>
             <button class="ghost-button" data-action="clear-roster" type="button">Clear roster</button>
           </div>
         </form>
@@ -425,7 +425,7 @@ function renderJoin() {
           <input id="playerName" name="playerName" autocomplete="name" required />
         </div>
         <div class="form-actions">
-          <button class="primary-button" type="submit">Join lobby</button>
+          <button class="primary-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? "Joining..." : "Join lobby"}</button>
         </div>
       </form>
     </section>
@@ -561,6 +561,7 @@ function renderGame() {
   const canAnswer = pending && pending.from !== player.id && !game.winnerId;
   const winner = game.winnerId ? getPlayer(game, game.winnerId) : null;
   const status = gameStatusText(game, player, currentPlayer, pending, winner);
+  const latestAnswer = latestAnswerEvent(game);
 
   app.innerHTML = `
     <section class="screen">
@@ -594,6 +595,14 @@ function renderGame() {
                   : `<span class="counter-pill">${pending.from === player.id ? "Waiting for answer" : "Question pending"}</span>`
               }
             </div>`
+          : latestAnswer
+            ? `<div class="top-question-banner answered">
+                <div>
+                  <small>${escapeHtml(latestAnswer.playerName)} answered ${escapeHtml(latestAnswer.answer)}</small>
+                  <strong>${escapeHtml(latestAnswer.questionText)}</strong>
+                </div>
+                <span class="answer-badge">${escapeHtml(latestAnswer.answer)}</span>
+              </div>`
           : ""
       }
 
@@ -864,6 +873,10 @@ async function createGame(formData) {
     return;
   }
 
+  if (state.busy) return;
+  state.busy = true;
+  renderCreate();
+
   const playerId = makeId("player");
   const code = uniqueCode();
   const game = {
@@ -884,11 +897,15 @@ async function createGame(formData) {
 
   try {
     await saveGame(game);
-  } catch {
-    toast(state.backend === "supabase" ? "Could not save room to Supabase" : "Photos are too large. Try fewer photos or smaller images.");
+  } catch (error) {
+    console.error(error);
+    state.busy = false;
+    renderCreate();
+    toast(state.backend === "supabase" ? syncErrorMessage(error, "Could not save room to Supabase") : "Photos are too large. Try fewer photos or smaller images.");
     return;
   }
 
+  state.busy = false;
   state.activeCode = code;
   state.playerId = playerId;
   state.mode = "lobby";
@@ -902,29 +919,50 @@ async function createGame(formData) {
 async function joinGame(formData) {
   const code = normalizeCode(formData.get("joinCode"));
   const name = String(formData.get("playerName") || "").trim();
-  const game = await fetchGame(code);
-
-  if (!game) {
-    toast("Room code not found");
-    return;
-  }
-
   if (!name) {
     toast("Enter your player name");
     return;
   }
 
+  if (state.busy) return;
+  state.busy = true;
+  renderJoin();
+
+  const game = await fetchGame(code);
+
+  if (!game) {
+    state.busy = false;
+    renderJoin();
+    toast("Room code not found");
+    return;
+  }
+
   if (game.started) {
+    state.busy = false;
+    renderJoin();
     toast("That game already started");
     return;
   }
 
   const playerId = makeId("player");
-  await mutateGame(code, (draft) => {
-    draft.players.push({ id: playerId, name, joinedAt: Date.now(), wins: 0 });
-    draft.eliminations[playerId] = [];
-  });
+  try {
+    await mutateGame(
+      code,
+      (draft) => {
+        draft.players.push({ id: playerId, name, joinedAt: Date.now(), wins: 0 });
+        draft.eliminations[playerId] = [];
+      },
+      { throwOnError: true }
+    );
+  } catch (error) {
+    console.error(error);
+    state.busy = false;
+    renderJoin();
+    toast(syncErrorMessage(error, "Could not join room"));
+    return;
+  }
 
+  state.busy = false;
   state.activeCode = code;
   state.playerId = playerId;
   state.mode = "lobby";
@@ -942,18 +980,28 @@ async function startGame(code) {
     return;
   }
 
-  await mutateGame(code, (draft) => {
-    const shuffled = shuffle([...draft.roster]);
-    draft.players.forEach((player, index) => {
-      draft.targets[player.id] = shuffled[index % shuffled.length].id;
-      draft.eliminations[player.id] = [];
-    });
-    draft.started = true;
-    draft.turnPlayerId = draft.players[0].id;
-    draft.pendingQuestion = null;
-    draft.winnerId = null;
-    draft.events.unshift(systemEvent(draft.players[0], "Game started", `${draft.players[0].name} asks first.`));
-  });
+  try {
+    await mutateGame(
+      code,
+      (draft) => {
+        const shuffled = shuffle([...draft.roster]);
+        draft.players.forEach((player, index) => {
+          draft.targets[player.id] = shuffled[index % shuffled.length].id;
+          draft.eliminations[player.id] = [];
+        });
+        draft.started = true;
+        draft.turnPlayerId = draft.players[0].id;
+        draft.pendingQuestion = null;
+        draft.winnerId = null;
+        draft.events.unshift(systemEvent(draft.players[0], "Game started", `${draft.players[0].name} asks first.`));
+      },
+      { throwOnError: true }
+    );
+  } catch (error) {
+    console.error(error);
+    toast(syncErrorMessage(error, "Could not start game"));
+    return;
+  }
 
   state.mode = "game";
   render();
@@ -980,12 +1028,16 @@ async function answerQuestion(code, playerId, answer) {
   await mutateGame(code, (draft) => {
     if (!draft.pendingQuestion || draft.pendingQuestion.from === playerId || draft.winnerId) return;
     const player = getPlayer(draft, playerId);
+    const question = draft.pendingQuestion;
     draft.events.push({
       id: makeId("answer"),
       playerId,
       playerName: player.name,
       label: "Answer",
       text: answer,
+      questionText: question.text,
+      questionFrom: question.from,
+      answer,
       at: Date.now()
     });
     draft.pendingQuestion = null;
@@ -1122,6 +1174,21 @@ function questionSuggestions(roster) {
   return [...new Set(suggestions)].slice(0, 7);
 }
 
+function latestAnswerEvent(game) {
+  const events = game.events || [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.label !== "Answer") continue;
+    const priorQuestion = [...events.slice(0, index)].reverse().find((item) => item.label === "Question");
+    return {
+      playerName: event.playerName || "Player",
+      answer: event.answer || event.text || "",
+      questionText: event.questionText || priorQuestion?.text || "Previous question"
+    };
+  }
+  return null;
+}
+
 function makeInviteLink(code) {
   const url = new URL(window.location.href);
   url.search = "";
@@ -1144,30 +1211,19 @@ async function setupBackend() {
   const hasConfig = config.url && config.anonKey && !config.url.includes("YOUR_") && !config.anonKey.includes("YOUR_");
   if (!hasConfig || !window.supabase?.createClient) {
     state.backend = "local";
+    state.games = loadLocalGames();
     return;
   }
 
   try {
     state.supabase = window.supabase.createClient(config.url, config.anonKey);
     state.backend = "supabase";
-    await fetchAllGames();
   } catch (error) {
     console.error(error);
     state.backend = "local";
+    state.games = loadLocalGames();
     toast("Supabase unavailable; using local mode");
   }
-}
-
-async function fetchAllGames() {
-  if (state.backend !== "supabase") return state.games;
-  const { data, error } = await state.supabase.from(SUPABASE_TABLE).select("code, game_state, updated_at").order("updated_at", { ascending: false });
-  if (error) throw error;
-  state.games = {};
-  data.forEach((row) => {
-    state.games[row.code] = normalizeGameState(row.game_state);
-    state.gameVersions[row.code] = row.updated_at || "";
-  });
-  return state.games;
 }
 
 async function fetchGame(code) {
@@ -1195,6 +1251,24 @@ async function fetchGame(code) {
   state.games[normalized] = normalizeGameState(data.game_state);
   state.gameVersions[normalized] = data.updated_at || "";
   return state.games[normalized];
+}
+
+async function fetchGameVersion(code) {
+  const normalized = normalizeCode(code);
+  if (!normalized || state.backend !== "supabase") return "";
+
+  const { data, error } = await state.supabase
+    .from(SUPABASE_TABLE)
+    .select("updated_at")
+    .eq("code", normalized)
+    .maybeSingle();
+
+  if (error) {
+    console.error(error);
+    return state.gameVersions[normalized] || "";
+  }
+
+  return data?.updated_at || "";
 }
 
 async function saveGame(game) {
@@ -1234,9 +1308,11 @@ function subscribeToGame(code) {
       },
       (payload) => {
         if (!payload.new?.game_state) return;
+        const before = gameSignature(state.games[code], state.playerId);
         state.games[code] = normalizeGameState(payload.new.game_state);
         state.gameVersions[code] = payload.new.updated_at || state.gameVersions[code] || "";
-        if (state.activeCode === code) render();
+        const after = gameSignature(state.games[code], state.playerId);
+        if (state.activeCode === code && before !== after) render();
       }
     )
     .subscribe();
@@ -1261,29 +1337,31 @@ async function pollRoom(code) {
   if (state.isPolling || state.backend !== "supabase" || state.activeCode !== code) return;
   state.isPolling = true;
   const beforeVersion = state.gameVersions[code] || "";
-  const before = gameSignature(getGame(code));
-  let game = null;
+  const before = gameSignature(getGame(code), state.playerId);
+  let game = getGame(code);
   try {
+    const latestVersion = await fetchGameVersion(code);
+    if (!latestVersion || latestVersion === beforeVersion) return;
     game = await fetchGame(code);
   } finally {
     state.isPolling = false;
   }
   const afterVersion = state.gameVersions[code] || "";
-  const after = gameSignature(game);
+  const after = gameSignature(game, state.playerId);
 
   if ((beforeVersion !== afterVersion || before !== after) && state.activeCode === code) {
     render();
   }
 }
 
-function gameSignature(game) {
+function gameSignature(game, playerId = null) {
   if (!game) return "";
   return JSON.stringify({
     players: game.players?.length || 0,
     started: game.started,
     turnPlayerId: game.turnPlayerId,
     targets: game.targets,
-    eliminations: game.eliminations,
+    ownEliminations: playerId ? game.eliminations?.[playerId] || [] : game.eliminations,
     pendingQuestion: game.pendingQuestion,
     winnerId: game.winnerId,
     events: game.events?.length || 0,
@@ -1322,7 +1400,7 @@ function getGame(code) {
   return state.games[normalizeCode(code)];
 }
 
-async function mutateGame(code, mutator) {
+async function mutateGame(code, mutator, options = {}) {
   const normalized = normalizeCode(code);
   const game = state.backend === "supabase" ? await fetchGame(normalized) : getGame(normalized);
   if (!game) return;
@@ -1330,9 +1408,17 @@ async function mutateGame(code, mutator) {
   try {
     await saveGame(game);
     render();
-  } catch {
-    toast(state.backend === "supabase" ? "Could not sync the latest move" : "Could not save the latest move");
+  } catch (error) {
+    toast(state.backend === "supabase" ? syncErrorMessage(error, "Could not sync the latest move") : "Could not save the latest move");
+    if (options.throwOnError) throw error;
   }
+}
+
+function syncErrorMessage(error, fallback) {
+  const message = String(error?.message || error?.details || "");
+  if (/row-level security|policy/i.test(message)) return "Supabase blocked saving. Run the setup SQL again.";
+  if (/too large|payload|request entity/i.test(message)) return "Photos are still too large. Try fewer photos.";
+  return fallback;
 }
 
 function uniqueCode() {
