@@ -48,7 +48,8 @@ const state = {
   supabase: null,
   realtimeChannel: null,
   pollTimer: null,
-  isPolling: false
+  isPolling: false,
+  gameVersions: {}
 };
 
 const app = document.querySelector("#app");
@@ -109,6 +110,9 @@ async function init() {
 
 function render() {
   const game = state.activeCode ? getGame(state.activeCode) : null;
+  if (state.activeCode && state.backend === "supabase" && !state.pollTimer) {
+    startRoomPolling(state.activeCode);
+  }
 
   if (game?.started && state.mode !== "join") {
     state.mode = "game";
@@ -1156,11 +1160,12 @@ async function setupBackend() {
 
 async function fetchAllGames() {
   if (state.backend !== "supabase") return state.games;
-  const { data, error } = await state.supabase.from(SUPABASE_TABLE).select("code, game_state").order("updated_at", { ascending: false });
+  const { data, error } = await state.supabase.from(SUPABASE_TABLE).select("code, game_state, updated_at").order("updated_at", { ascending: false });
   if (error) throw error;
   state.games = {};
   data.forEach((row) => {
     state.games[row.code] = normalizeGameState(row.game_state);
+    state.gameVersions[row.code] = row.updated_at || "";
   });
   return state.games;
 }
@@ -1172,7 +1177,7 @@ async function fetchGame(code) {
 
   const { data, error } = await state.supabase
     .from(SUPABASE_TABLE)
-    .select("game_state")
+    .select("game_state, updated_at")
     .eq("code", normalized)
     .maybeSingle();
 
@@ -1188,6 +1193,7 @@ async function fetchGame(code) {
   }
 
   state.games[normalized] = normalizeGameState(data.game_state);
+  state.gameVersions[normalized] = data.updated_at || "";
   return state.games[normalized];
 }
 
@@ -1198,13 +1204,15 @@ async function saveGame(game) {
     return;
   }
 
+  const updatedAt = new Date().toISOString();
   const { error } = await state.supabase.from(SUPABASE_TABLE).upsert({
     code: game.code,
     game_state: game,
-    updated_at: new Date().toISOString()
+    updated_at: updatedAt
   });
 
   if (error) throw error;
+  state.gameVersions[game.code] = updatedAt;
 }
 
 function subscribeToGame(code) {
@@ -1227,6 +1235,7 @@ function subscribeToGame(code) {
       (payload) => {
         if (!payload.new?.game_state) return;
         state.games[code] = normalizeGameState(payload.new.game_state);
+        state.gameVersions[code] = payload.new.updated_at || state.gameVersions[code] || "";
         if (state.activeCode === code) render();
       }
     )
@@ -1238,6 +1247,7 @@ function startRoomPolling(code) {
   if (state.backend !== "supabase" || !normalized) return;
   stopRoomPolling();
   state.pollTimer = window.setInterval(() => pollRoom(normalized), SYNC_POLL_MS);
+  pollRoom(normalized);
 }
 
 function stopRoomPolling() {
@@ -1250,12 +1260,18 @@ function stopRoomPolling() {
 async function pollRoom(code) {
   if (state.isPolling || state.backend !== "supabase" || state.activeCode !== code) return;
   state.isPolling = true;
+  const beforeVersion = state.gameVersions[code] || "";
   const before = gameSignature(getGame(code));
-  const game = await fetchGame(code);
+  let game = null;
+  try {
+    game = await fetchGame(code);
+  } finally {
+    state.isPolling = false;
+  }
+  const afterVersion = state.gameVersions[code] || "";
   const after = gameSignature(game);
-  state.isPolling = false;
 
-  if (before !== after && state.activeCode === code) {
+  if ((beforeVersion !== afterVersion || before !== after) && state.activeCode === code) {
     render();
   }
 }
