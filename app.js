@@ -4,6 +4,7 @@ const MAX_ROSTER = 20;
 const MIN_ROSTER = 2;
 const PHOTO_MAX_SIZE = 720;
 const PHOTO_QUALITY = 0.72;
+const SUPABASE_TABLE = "friend_who_games";
 
 const demoPeople = [
   ["Maya", "teal", ["glasses", "curly hair", "blue shirt"]],
@@ -40,7 +41,11 @@ const state = {
   activeCode: null,
   playerId: null,
   draftRoster: [],
-  toastTimer: null
+  toastTimer: null,
+  games: {},
+  backend: "local",
+  supabase: null,
+  realtimeChannel: null
 };
 
 const app = document.querySelector("#app");
@@ -48,17 +53,22 @@ const homeTemplate = document.querySelector("#homeTemplate");
 
 init();
 
-function init() {
+async function init() {
   state.draftRoster = makeBlankRoster(MIN_ROSTER);
+  state.games = loadLocalGames();
+  await setupBackend();
   const url = new URL(window.location.href);
   const code = normalizeCode(url.searchParams.get("code") || "");
   const urlPlayerId = url.searchParams.get("player");
   const storedPlayerId = urlPlayerId || (code ? null : sessionStorage.getItem(SESSION_KEY));
 
+  if (code) await fetchGame(code);
+
   if (code && getGame(code)) {
     state.activeCode = code;
     state.playerId = storedPlayerId;
     state.mode = storedPlayerId && getPlayer(getGame(code), storedPlayerId) ? "lobby" : "join";
+    subscribeToGame(code);
   }
 
   document.querySelector("#homeButton").addEventListener("click", () => {
@@ -82,7 +92,10 @@ function init() {
   });
 
   window.addEventListener("storage", (event) => {
-    if (event.key === STORAGE_KEY) render();
+    if (event.key === STORAGE_KEY && state.backend === "local") {
+      state.games = loadLocalGames();
+      render();
+    }
   });
 
   render();
@@ -123,7 +136,7 @@ function renderHome() {
     <div class="screen-header">
       <div>
         <h2>Saved rooms</h2>
-        <p>Rooms are saved locally in this browser for quick testing and party setup.</p>
+        <p>${state.backend === "supabase" ? "Rooms are synced through Supabase so invite codes work across devices." : "Rooms are saved locally until Supabase is configured."}</p>
       </div>
       <button class="secondary-button" data-action="show-create" type="button">New room</button>
     </div>
@@ -232,9 +245,9 @@ function renderCreate() {
     renderPeopleEditor();
   });
 
-  document.querySelector("#createForm").addEventListener("submit", (event) => {
+  document.querySelector("#createForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    createGame(new FormData(event.currentTarget));
+    await createGame(new FormData(event.currentTarget));
   });
 }
 
@@ -325,9 +338,9 @@ function renderJoin() {
   `;
 
   bindBackButtons();
-  document.querySelector("#joinForm").addEventListener("submit", (event) => {
+  document.querySelector("#joinForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    joinGame(new FormData(event.currentTarget));
+    await joinGame(new FormData(event.currentTarget));
   });
 }
 
@@ -606,7 +619,7 @@ function renderGame() {
   });
 }
 
-function createGame(formData) {
+async function createGame(formData) {
   const roster = validRoster(state.draftRoster);
   if (roster.length < MIN_ROSTER) {
     toast("Add at least 2 named photos");
@@ -638,12 +651,10 @@ function createGame(formData) {
     events: []
   };
 
-  const games = loadGames();
-  games[code] = game;
   try {
-    saveGames(games);
+    await saveGame(game);
   } catch {
-    toast("Photos are too large. Try fewer photos or smaller images.");
+    toast(state.backend === "supabase" ? "Could not save room to Supabase" : "Photos are too large. Try fewer photos or smaller images.");
     return;
   }
 
@@ -652,13 +663,14 @@ function createGame(formData) {
   state.mode = "lobby";
   sessionStorage.setItem(SESSION_KEY, playerId);
   setUrlState(code, playerId);
+  subscribeToGame(code);
   render();
 }
 
-function joinGame(formData) {
+async function joinGame(formData) {
   const code = normalizeCode(formData.get("joinCode"));
   const name = String(formData.get("playerName") || "").trim();
-  const game = getGame(code);
+  const game = await fetchGame(code);
 
   if (!game) {
     toast("Room code not found");
@@ -676,7 +688,7 @@ function joinGame(formData) {
   }
 
   const playerId = makeId("player");
-  mutateGame(code, (draft) => {
+  await mutateGame(code, (draft) => {
     draft.players.push({ id: playerId, name, joinedAt: Date.now(), wins: 0 });
     draft.eliminations[playerId] = [];
   });
@@ -686,17 +698,18 @@ function joinGame(formData) {
   state.mode = "lobby";
   sessionStorage.setItem(SESSION_KEY, playerId);
   setUrlState(code, playerId);
+  subscribeToGame(code);
   render();
 }
 
-function startGame(code) {
-  const game = getGame(code);
+async function startGame(code) {
+  const game = await fetchGame(code);
   if (!game || game.players.length < 2) {
     toast("Need at least two players");
     return;
   }
 
-  mutateGame(code, (draft) => {
+  await mutateGame(code, (draft) => {
     const shuffled = shuffle([...draft.roster]);
     draft.players.forEach((player, index) => {
       draft.targets[player.id] = shuffled[index % shuffled.length].id;
@@ -713,8 +726,8 @@ function startGame(code) {
   render();
 }
 
-function sendQuestion(code, playerId, text) {
-  mutateGame(code, (draft) => {
+async function sendQuestion(code, playerId, text) {
+  await mutateGame(code, (draft) => {
     if (draft.turnPlayerId !== playerId || draft.pendingQuestion || draft.winnerId) return;
     const player = getPlayer(draft, playerId);
     const id = makeId("question");
@@ -730,8 +743,8 @@ function sendQuestion(code, playerId, text) {
   });
 }
 
-function answerQuestion(code, playerId, answer) {
-  mutateGame(code, (draft) => {
+async function answerQuestion(code, playerId, answer) {
+  await mutateGame(code, (draft) => {
     if (!draft.pendingQuestion || draft.pendingQuestion.from === playerId || draft.winnerId) return;
     const player = getPlayer(draft, playerId);
     draft.events.push({
@@ -747,8 +760,8 @@ function answerQuestion(code, playerId, answer) {
   });
 }
 
-function sendChat(code, playerId, text) {
-  mutateGame(code, (draft) => {
+async function sendChat(code, playerId, text) {
+  await mutateGame(code, (draft) => {
     const player = getPlayer(draft, playerId);
     draft.events.push({
       id: makeId("chat"),
@@ -761,8 +774,8 @@ function sendChat(code, playerId, text) {
   });
 }
 
-function makeGuess(code, playerId, guessPersonId) {
-  mutateGame(code, (draft) => {
+async function makeGuess(code, playerId, guessPersonId) {
+  await mutateGame(code, (draft) => {
     if (draft.turnPlayerId !== playerId || draft.pendingQuestion || draft.winnerId) return;
     const player = getPlayer(draft, playerId);
     const opponent = firstOpponent(draft, playerId);
@@ -784,8 +797,8 @@ function makeGuess(code, playerId, guessPersonId) {
   });
 }
 
-function rematch(code) {
-  mutateGame(code, (draft) => {
+async function rematch(code) {
+  await mutateGame(code, (draft) => {
     const shuffled = shuffle([...draft.roster]);
     draft.players.forEach((player, index) => {
       draft.targets[player.id] = shuffled[index % shuffled.length].id;
@@ -799,8 +812,8 @@ function rematch(code) {
   });
 }
 
-function toggleEliminated(code, playerId, personId) {
-  mutateGame(code, (draft) => {
+async function toggleEliminated(code, playerId, personId) {
+  await mutateGame(code, (draft) => {
     const existing = new Set(draft.eliminations[playerId] || []);
     if (existing.has(personId)) existing.delete(personId);
     else existing.add(personId);
@@ -808,14 +821,19 @@ function toggleEliminated(code, playerId, personId) {
   });
 }
 
-function openGame(code) {
-  const game = getGame(code);
+async function openGame(code) {
+  const game = await fetchGame(code);
+  if (!game) {
+    toast("Room code not found");
+    return;
+  }
   state.activeCode = code;
   setUrlState(code);
   const sessionPlayer = sessionStorage.getItem(SESSION_KEY);
   state.playerId = sessionPlayer && getPlayer(game, sessionPlayer) ? sessionPlayer : null;
   if (state.playerId) setUrlState(code, state.playerId);
   state.mode = state.playerId ? (game.started ? "game" : "lobby") : "join";
+  subscribeToGame(code);
   render();
 }
 
@@ -887,7 +905,116 @@ function setUrlState(code, playerId = null) {
   window.history.replaceState({}, "", url);
 }
 
-function loadGames() {
+async function setupBackend() {
+  const config = window.FRIEND_WHO_SUPABASE || {};
+  const hasConfig = config.url && config.anonKey && !config.url.includes("YOUR_") && !config.anonKey.includes("YOUR_");
+  if (!hasConfig || !window.supabase?.createClient) {
+    state.backend = "local";
+    return;
+  }
+
+  try {
+    state.supabase = window.supabase.createClient(config.url, config.anonKey);
+    state.backend = "supabase";
+    await fetchAllGames();
+  } catch (error) {
+    console.error(error);
+    state.backend = "local";
+    toast("Supabase unavailable; using local mode");
+  }
+}
+
+async function fetchAllGames() {
+  if (state.backend !== "supabase") return state.games;
+  const { data, error } = await state.supabase.from(SUPABASE_TABLE).select("code, game_state").order("updated_at", { ascending: false });
+  if (error) throw error;
+  state.games = {};
+  data.forEach((row) => {
+    state.games[row.code] = normalizeGameState(row.game_state);
+  });
+  return state.games;
+}
+
+async function fetchGame(code) {
+  const normalized = normalizeCode(code);
+  if (!normalized) return null;
+  if (state.backend !== "supabase") return getGame(normalized);
+
+  const { data, error } = await state.supabase
+    .from(SUPABASE_TABLE)
+    .select("game_state")
+    .eq("code", normalized)
+    .maybeSingle();
+
+  if (error) {
+    console.error(error);
+    toast("Could not check room code");
+    return null;
+  }
+
+  if (!data?.game_state) {
+    delete state.games[normalized];
+    return null;
+  }
+
+  state.games[normalized] = normalizeGameState(data.game_state);
+  return state.games[normalized];
+}
+
+async function saveGame(game) {
+  state.games[game.code] = normalizeGameState(game);
+  if (state.backend !== "supabase") {
+    saveLocalGames(state.games);
+    return;
+  }
+
+  const { error } = await state.supabase.from(SUPABASE_TABLE).upsert({
+    code: game.code,
+    game_state: game,
+    updated_at: new Date().toISOString()
+  });
+
+  if (error) throw error;
+}
+
+function subscribeToGame(code) {
+  if (state.backend !== "supabase" || !code) return;
+  if (state.realtimeChannel) {
+    state.supabase.removeChannel(state.realtimeChannel);
+    state.realtimeChannel = null;
+  }
+
+  state.realtimeChannel = state.supabase
+    .channel(`friend-who-${code}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: SUPABASE_TABLE,
+        filter: `code=eq.${code}`
+      },
+      (payload) => {
+        if (!payload.new?.game_state) return;
+        state.games[code] = normalizeGameState(payload.new.game_state);
+        if (state.activeCode === code) render();
+      }
+    )
+    .subscribe();
+}
+
+function normalizeGameState(game) {
+  return {
+    ...game,
+    players: game.players || [],
+    roster: game.roster || [],
+    targets: game.targets || {},
+    eliminations: game.eliminations || {},
+    events: game.events || []
+  };
+}
+
+function loadLocalGames() {
   try {
     return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
   } catch {
@@ -895,26 +1022,28 @@ function loadGames() {
   }
 }
 
-function saveGames(games) {
+function saveLocalGames(games) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(games));
 }
 
-function getGame(code) {
-  return loadGames()[normalizeCode(code)];
+function loadGames() {
+  return state.games;
 }
 
-function mutateGame(code, mutator) {
-  const games = loadGames();
+function getGame(code) {
+  return state.games[normalizeCode(code)];
+}
+
+async function mutateGame(code, mutator) {
   const normalized = normalizeCode(code);
-  const game = games[normalized];
+  const game = state.backend === "supabase" ? await fetchGame(normalized) : getGame(normalized);
   if (!game) return;
   mutator(game);
-  games[normalized] = game;
   try {
-    saveGames(games);
+    await saveGame(game);
     render();
   } catch {
-    toast("Could not save the latest move");
+    toast(state.backend === "supabase" ? "Could not sync the latest move" : "Could not save the latest move");
   }
 }
 
