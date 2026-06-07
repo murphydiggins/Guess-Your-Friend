@@ -663,6 +663,12 @@ select:focus {
   background: var(--gold);
 }
 
+.top-question-banner.answered {
+  background: #e8f4f2;
+  border-color: var(--teal);
+  box-shadow: 4px 4px 0 var(--teal);
+}
+
 .top-question-banner small {
   margin-bottom: 4px;
   color: rgba(29, 37, 40, 0.72);
@@ -674,6 +680,21 @@ select:focus {
 .top-question-banner strong {
   font-size: 18px;
   line-height: 1.25;
+}
+
+.answer-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  min-height: 44px;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 950;
+  box-shadow: 3px 3px 0 var(--ink);
 }
 
 .board-shell {
