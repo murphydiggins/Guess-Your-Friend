@@ -197,7 +197,7 @@ function renderCreate() {
               <button class="secondary-button" data-action="add-person" type="button">Add person</button>
             </div>
           </div>
-          <input class="hidden" id="cameraRollInput" type="file" accept="image/*" multiple />
+          <input class="hidden" id="cameraRollInput" type="file" accept="image/*,.heic,.heif" multiple />
 
           <div class="people-editor" id="peopleEditor"></div>
 
@@ -276,7 +276,7 @@ function renderPeopleEditor() {
         <div class="person-row" data-person-row="${person.id}">
           <label class="photo-slot" title="Upload photo">
             ${person.photo ? `<img src="${person.photo}" alt="" />` : `<span>Photo</span>`}
-            <input data-photo-index="${index}" type="file" accept="image/*" aria-label="Upload photo for person ${index + 1}" />
+            <input data-photo-index="${index}" type="file" accept="image/*,.heic,.heif" multiple aria-label="Upload photo for person ${index + 1}" />
           </label>
           <input data-name-index="${index}" value="${escapeAttr(person.name)}" placeholder="Person ${index + 1} name" aria-label="Person ${index + 1} name" />
           <button class="small-icon-button" data-remove-index="${index}" type="button" title="Remove person" aria-label="Remove person">x</button>
@@ -294,8 +294,16 @@ function renderPeopleEditor() {
 
   editor.querySelectorAll("[data-photo-index]").forEach((input) => {
     input.addEventListener("change", async (event) => {
-      const file = event.target.files[0];
-      if (!file) return;
+      const files = Array.from(event.target.files || []);
+      if (!files.length) return;
+
+      if (files.length > 1) {
+        await importCameraRollPhotos(files);
+        event.target.value = "";
+        return;
+      }
+
+      const file = files[0];
       try {
         toast("Optimizing photo...");
         const dataUrl = await compressImage(file);
@@ -304,6 +312,7 @@ function renderPeopleEditor() {
       } catch {
         toast("Could not load that photo");
       }
+      event.target.value = "";
     });
   });
 
@@ -320,13 +329,14 @@ function renderPeopleEditor() {
 }
 
 async function importCameraRollPhotos(files) {
-  const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+  const imageFiles = files.filter(isLikelyImageFile);
   if (!imageFiles.length) {
     toast("Choose photos from your camera roll");
     return;
   }
 
-  const availableSlots = MAX_ROSTER - validRoster(state.draftRoster).length;
+  const existingPeople = state.draftRoster.filter((person) => person.photo || person.name.trim());
+  const availableSlots = MAX_ROSTER - existingPeople.length;
   const selected = imageFiles.slice(0, availableSlots);
   if (!selected.length) {
     toast("Maximum board size is 20 people");
@@ -335,47 +345,37 @@ async function importCameraRollPhotos(files) {
 
   toast(`Importing ${selected.length} photo${selected.length === 1 ? "" : "s"}...`);
 
+  const importedPeople = [];
+  let failedCount = 0;
+
   for (const file of selected) {
     try {
       const dataUrl = await compressImage(file);
-      upsertImportedPerson({
+      importedPeople.push({
         id: makeId("person"),
-        name: nameFromFile(file.name),
+        name: nameFromFile(file.name) || `Person ${existingPeople.length + importedPeople.length + 1}`,
         photo: dataUrl,
         tags: []
       });
     } catch {
-      toast(`Could not import ${file.name}`);
+      failedCount += 1;
     }
   }
 
+  state.draftRoster = [...existingPeople, ...importedPeople];
+  while (state.draftRoster.length < MIN_ROSTER) {
+    state.draftRoster.push(blankPerson());
+  }
+
   renderPeopleEditor();
-  if (imageFiles.length > selected.length) {
+  if (!importedPeople.length) {
+    toast("Could not import those photos");
+  } else if (failedCount) {
+    toast(`Imported ${importedPeople.length}; ${failedCount} failed`);
+  } else if (imageFiles.length > selected.length) {
     toast(`Imported ${selected.length}; board limit is 20`);
   } else {
-    toast("Photos imported");
-  }
-}
-
-function upsertImportedPerson(person) {
-  const blankIndex = state.draftRoster.findIndex((item) => !item.photo && !item.name.trim());
-  if (blankIndex >= 0) {
-    state.draftRoster[blankIndex] = person;
-    return;
-  }
-
-  const photoOnlyIndex = state.draftRoster.findIndex((item) => !item.photo || !item.name.trim());
-  if (photoOnlyIndex >= 0) {
-    state.draftRoster[photoOnlyIndex] = {
-      ...state.draftRoster[photoOnlyIndex],
-      ...person,
-      name: state.draftRoster[photoOnlyIndex].name.trim() || person.name
-    };
-    return;
-  }
-
-  if (state.draftRoster.length < MAX_ROSTER) {
-    state.draftRoster.push(person);
+    toast(`Imported ${importedPeople.length} photo${importedPeople.length === 1 ? "" : "s"}`);
   }
 }
 
@@ -386,6 +386,10 @@ function nameFromFile(filename) {
     .split(/\s+/)
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
     .join(" ");
+}
+
+function isLikelyImageFile(file) {
+  return file.type.startsWith("image/") || /\.(heic|heif|jpe?g|png|webp|gif)$/i.test(file.name) || !file.type;
 }
 
 function renderJoin() {
@@ -1319,7 +1323,7 @@ function systemEvent(player, label, text) {
 
 function compressImage(file) {
   return new Promise((resolve, reject) => {
-    if (!file.type.startsWith("image/")) {
+    if (!isLikelyImageFile(file)) {
       reject(new Error("Not an image"));
       return;
     }
