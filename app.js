@@ -1,5 +1,6 @@
 const STORAGE_KEY = "friend-who.games.v1";
 const SESSION_KEY = "friend-who.player.v1";
+const APP_VERSION = "v0.9.0";
 const MAX_ROSTER = 20;
 const MIN_ROSTER = 2;
 const PHOTO_MAX_SIZE = 520;
@@ -44,6 +45,7 @@ const state = {
   draftRoster: [],
   toastTimer: null,
   busy: false,
+  loadingMessage: "",
   games: {},
   backend: "local",
   supabase: null,
@@ -118,11 +120,32 @@ function render() {
     state.mode = "game";
   }
 
-  if (state.mode === "create") return renderCreate();
-  if (state.mode === "join") return renderJoin();
-  if (state.mode === "lobby") return renderLobby();
-  if (state.mode === "game") return renderGame();
-  renderHome();
+  if (state.mode === "create") renderCreate();
+  else if (state.mode === "join") renderJoin();
+  else if (state.mode === "lobby") renderLobby();
+  else if (state.mode === "game") renderGame();
+  else renderHome();
+
+  renderAppChrome();
+}
+
+function renderAppChrome() {
+  app.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div class="version-badge" aria-label="App version">${APP_VERSION}</div>
+      ${
+        state.busy
+          ? `<div class="loading-overlay" role="status" aria-live="polite">
+              <div class="loading-card">
+                <span class="loading-spinner" aria-hidden="true"></span>
+                <strong>${escapeHtml(state.loadingMessage || "Loading...")}</strong>
+              </div>
+            </div>`
+          : ""
+      }
+    `
+  );
 }
 
 function renderHome() {
@@ -314,12 +337,20 @@ function renderPeopleEditor() {
       }
 
       const file = files[0];
+      const photoIndex = Number(event.target.dataset.photoIndex);
       try {
-        toast("Optimizing photo...");
+        state.busy = true;
+        state.loadingMessage = "Optimizing photo...";
+        render();
         const dataUrl = await compressImage(file);
-        state.draftRoster[Number(event.target.dataset.photoIndex)].photo = dataUrl;
-        renderPeopleEditor();
+        state.draftRoster[photoIndex].photo = dataUrl;
+        state.busy = false;
+        state.loadingMessage = "";
+        render();
       } catch {
+        state.busy = false;
+        state.loadingMessage = "";
+        render();
         toast("Could not load that photo");
       }
       event.target.value = "";
@@ -353,7 +384,9 @@ async function importCameraRollPhotos(files) {
     return;
   }
 
-  toast(`Importing ${selected.length} photo${selected.length === 1 ? "" : "s"}...`);
+  state.busy = true;
+  state.loadingMessage = `Importing ${selected.length} photo${selected.length === 1 ? "" : "s"}...`;
+  render();
 
   const importedPeople = [];
   let failedCount = 0;
@@ -377,7 +410,9 @@ async function importCameraRollPhotos(files) {
     state.draftRoster.push(blankPerson());
   }
 
-  renderPeopleEditor();
+  state.busy = false;
+  state.loadingMessage = "";
+  render();
   if (!importedPeople.length) {
     toast("Could not import those photos");
   } else if (failedCount) {
@@ -875,7 +910,8 @@ async function createGame(formData) {
 
   if (state.busy) return;
   state.busy = true;
-  renderCreate();
+  state.loadingMessage = "Creating room...";
+  render();
 
   const playerId = makeId("player");
   const code = uniqueCode();
@@ -900,12 +936,14 @@ async function createGame(formData) {
   } catch (error) {
     console.error(error);
     state.busy = false;
-    renderCreate();
+    state.loadingMessage = "";
+    render();
     toast(state.backend === "supabase" ? syncErrorMessage(error, "Could not save room to Supabase") : "Photos are too large. Try fewer photos or smaller images.");
     return;
   }
 
   state.busy = false;
+  state.loadingMessage = "";
   state.activeCode = code;
   state.playerId = playerId;
   state.mode = "lobby";
@@ -926,20 +964,23 @@ async function joinGame(formData) {
 
   if (state.busy) return;
   state.busy = true;
-  renderJoin();
+  state.loadingMessage = "Joining room...";
+  render();
 
   const game = await fetchGame(code);
 
   if (!game) {
     state.busy = false;
-    renderJoin();
+    state.loadingMessage = "";
+    render();
     toast("Room code not found");
     return;
   }
 
   if (game.started) {
     state.busy = false;
-    renderJoin();
+    state.loadingMessage = "";
+    render();
     toast("That game already started");
     return;
   }
@@ -957,12 +998,14 @@ async function joinGame(formData) {
   } catch (error) {
     console.error(error);
     state.busy = false;
-    renderJoin();
+    state.loadingMessage = "";
+    render();
     toast(syncErrorMessage(error, "Could not join room"));
     return;
   }
 
   state.busy = false;
+  state.loadingMessage = "";
   state.activeCode = code;
   state.playerId = playerId;
   state.mode = "lobby";
@@ -979,6 +1022,10 @@ async function startGame(code) {
     toast("Need at least two players");
     return;
   }
+
+  state.busy = true;
+  state.loadingMessage = "Starting game...";
+  render();
 
   try {
     await mutateGame(
@@ -999,10 +1046,15 @@ async function startGame(code) {
     );
   } catch (error) {
     console.error(error);
+    state.busy = false;
+    state.loadingMessage = "";
+    render();
     toast(syncErrorMessage(error, "Could not start game"));
     return;
   }
 
+  state.busy = false;
+  state.loadingMessage = "";
   state.mode = "game";
   render();
 }
